@@ -16,6 +16,19 @@ on:
       - 'lambda-functions/**'
       - '.github/workflows/terraform.yml'
   workflow_dispatch:  # Allows manual trigger
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - destroy
+      confirm_destroy:
+        description: 'Type "destroy" to confirm destruction of all resources'
+        required: false
+        type: string
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -25,7 +38,8 @@ jobs:
   terraform:
     name: 'Terraform Plan & Apply'
     runs-on: ubuntu-latest
-    
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.action != 'destroy'
+
     defaults:
       run:
         working-directory: ./terraform
@@ -71,3 +85,63 @@ jobs:
     - name: Terraform Output
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: terraform output -json
+
+  terraform-destroy:
+    name: 'Terraform Destroy'
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+    - name: Validate Destroy Confirmation
+      run: |
+        if [ "${{ github.event.inputs.confirm_destroy }}" != "destroy" ]; then
+          echo "::error::Destroy confirmation failed. You must type 'destroy' to confirm."
+          exit 1
+        fi
+        echo "::warning::This will destroy ALL resources managed by Terraform!"
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform Init
+      id: init
+      run: terraform init
+
+    - name: Terraform Destroy Plan
+      id: destroy_plan
+      run: |
+        echo "::warning::Generating destroy plan..."
+        terraform plan -destroy -no-color -out=destroy.tfplan
+
+    - name: Show Destroy Plan
+      run: |
+        echo "::warning::Resources that will be destroyed:"
+        terraform show -no-color destroy.tfplan
+
+    - name: Terraform Destroy
+      id: destroy
+      run: |
+        echo "::warning::Destroying all Terraform-managed resources..."
+        terraform apply -auto-approve destroy.tfplan
+        echo "::notice::All resources have been destroyed successfully"
+
+    - name: Verify Destruction
+      run: |
+        echo "Running terraform show to verify all resources are destroyed..."
+        terraform show
